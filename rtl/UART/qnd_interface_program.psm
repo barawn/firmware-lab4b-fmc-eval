@@ -1,0 +1,313 @@
+CONSTANT UART_status_port, 00
+CONSTANT UART_Rx_port, 01
+CONSTANT UART_Tx_port, 01
+CONSTANT UART_reset, 01
+CONSTANT UART_txempty, 02
+CONSTANT UART_txfull,  04
+CONSTANT recvBuffer, 30
+CONSTANT startCmdBuffer, 31
+CONSTANT zmodemBuffer, 10
+CONSTANT cmdReadReg,  52
+CONSTANT cmdWriteReg, 57
+CONSTANT cmdXfer,     58
+CONSTANT cmdPromptOn, 50
+CONSTANT cmdEchoOn,   45
+CONSTANT cmdPromptOff, 70
+CONSTANT cmdEchoOff,  65
+CONSTANT ZDLE, 18
+CONSTANT ZDLEE, 58
+CONSTANT ZBIN, 41
+CONSTANT ZHEX, 42
+CONSTANT ZPAD, 2A
+; This is compared against escapes.
+CONSTANT ZESCMASK, 7F
+CONSTANT ZESC1, 10
+CONSTANT ZESC2, 11
+CONSTANT ZESC3, 13
+CONSTANT ZESCSEQ1, 40
+CONSTANT ZESCSEQ2, 0D
+; Frame types
+CONSTANT ZRQINIT, 00
+CONSTANT ZFILE, 04
+CONSTANT ZEOF, 0B
+CONSTANT ZFIN, 08
+
+
+STRING	 Prompt$, "QnD> "
+STRING	 Clear_screen$, "[2J"
+STRING   Reset_screen$, "c"
+STRING	 Unknown$, "? R, W, X"
+STRING	 Readhelp$, "R [00-7F]"
+STRING	 Writehelp1$, "W [00-7F]"
+STRING	 Writehelp2$, " [00-FF]"
+CONSTANT VT100_esc, 1B
+CONSTANT Space_char, 20
+CONSTANT CR_char, 0D
+CONSTANT LF_char, 0A
+CONSTANT XON, 11
+CONSTANT XOFF, 13
+CONSTANT Ctrl_a, 01
+
+CONSTANT Sermode_Zmodem, 01
+CONSTANT Sermode_ZmodemMask, FE
+CONSTANT Sermode_Lecho, 02
+CONSTANT Sermode_LechoMask, FD
+CONSTANT Sermode_Prompt, 04
+CONSTANT Sermode_PromptMask, FB
+
+NAMEREG  s8, Sermode
+;
+; Local echo/command receiving/ZMODEM packet reception
+; are all handled by the ISR.
+;
+; We have 64 bytes of scratchpad RAM: 32 of those bytes
+; are the receive buffer.
+; REGBANK B is the ISR's register bank.
+; sF is the receive buffer size: if it has the high bit
+; set, the buffer is complete (received CR)
+reset:			LOAD	s0, FF
+			CALL	sleep
+			REGBANK B
+			LOAD	s1, 00
+; Echo on by default.
+			LOAD	Sermode, Sermode_Lecho
+			STAR	sF, s1
+			REGBANK A
+			LOAD	Sermode, Sermode_Prompt
+			OUTPUTK	VT100_esc, UART_Tx_port
+			OUTPUTK Clear_screen$, UART_Tx_port
+			OUTPUTK	VT100_esc, UART_Tx_port
+			OUTPUTK Reset_screen$, UART_Tx_port
+			LOAD	s0, FF
+			CALL	sleep
+			ENABLE INTERRUPT
+start:			TEST	Sermode, Sermode_Prompt
+			JUMP	Z, loop
+			OUTPUTK Prompt$, UART_Tx_port
+loop:			TEST	sF,	 80
+			JUMP	Z,	 loop
+rcvcmd:			AND	sF,	7F
+			JUMP	Z,	doneCmd
+			FETCH	s0,	recvBuffer
+			COMPARE s0,	cmdReadReg
+			JUMP	Z, 	readRegisterCmd
+			COMPARE	s0,	cmdWriteReg
+			JUMP	Z,	writeRegisterCmd
+			COMPARE	s0,	cmdXfer
+			JUMP	Z, 	xferCmd
+			COMPARE s0,	cmdPromptOn
+			JUMP	Z,	promptOnCmd
+			COMPARE s0, 	cmdPromptOff
+			JUMP	Z, 	promptOffCmd
+			COMPARE	s0,	cmdEchoOn
+			JUMP	Z,	echoOnCmd
+			COMPARE	s0,	cmdEchoOff
+			JUMP	Z,	echoOffCmd
+unknownCmd:		OUTPUTK	Unknown$, UART_Tx_port
+			CALL	line_ending
+			JUMP	doneCmd
+echoOnCmd:		REGBANK B
+			OR	Sermode, Sermode_Lecho
+			REGBANK A
+			JUMP	doneCmd
+echoOffCmd:		REGBANK	B
+			AND	Sermode, Sermode_LechoMask
+			REGBANK A
+			JUMP	doneCmd
+promptOnCmd:		OR	Sermode, Sermode_Prompt
+			JUMP	doneCmd
+promptOffCmd:		AND	Sermode, Sermode_PromptMask
+			JUMP	doneCmd
+UART_wait:	
+			INPUT	s0,	UART_status_port
+			TEST	s0,	UART_txempty
+			JUMP	Z,	UART_wait
+			RETURN
+; Line ending (\r\n). Change here if it's an issue. Shouldn't be.
+line_ending:
+			OUTPUTK CR_char, UART_Tx_port
+			OUTPUTK LF_char, UART_Tx_port
+			RETURN
+
+; getParameter - called with pointer to current
+; location in buffer in s2, and of course current
+; remaining space in sF.
+; returns success/failure in s1 (success = 0, failure = 1)
+; and parameter in s0. s2/sF are modified to next spot.
+getParameter:		CALL	skipWhitespace
+			COMPARE	sF, 02
+			JUMP	C, getParameter_exitErr
+			FETCH	s1, (s2)
+			ADD	s2, 01
+			SUB	sF, 01
+			FETCH	s0, (s2)
+			ADD	s2, 01
+			SUB	sF, 01
+			CALL	hexdec
+			LOAD	s1, 00
+			RETURN
+getParameter_exitErr:	LOAD	s1, 01
+			RETURN			
+; read register command:
+; 1) skip whitespace
+; 2) chec
+readRegisterCmd:	SUB	sF,	01
+			LOAD	s2, 	startCmdBuffer
+			CALL	getParameter
+			COMPARE	s1, 	01
+			JUMP	Z, 	readRegisterErr
+			TEST	s0, 	80
+			JUMP	NZ, 	readRegisterErr
+			OR	s0, 80
+			INPUT	s1, (s0)
+			LOAD	s0, s1
+			CALL	hexenc
+			OUTPUT	s1, UART_Tx_port
+			OUTPUT	s0, UART_Tx_port
+			CALL	line_ending
+			JUMP	doneCmd
+readRegisterErr:	OUTPUTK	Readhelp$, UART_Tx_port
+			CALL	line_ending
+			JUMP	doneCmd
+writeRegisterCmd:	SUB	sF, 	01
+			LOAD	s2,	startCmdBuffer
+			CALL	getParameter
+			COMPARE	s1,	01
+			JUMP	Z, 	writeRegisterErr
+			TEST	s0,	80
+			JUMP	NZ, 	writeRegisterErr
+			OR	s0,	80
+			LOAD	s3, 	s0
+			CALL	getParameter
+			COMPARE	s1,	01
+			JUMP	Z, 	writeRegisterErr
+			OUTPUT	s0,	(s3)			
+			JUMP	doneCmd
+writeRegisterErr:	OUTPUTK	Writehelp1$, UART_Tx_port
+			CALL	UART_wait
+			OUTPUTK	Writehelp2$, UART_Tx_port
+			CALL	line_ending
+			JUMP	doneCmd
+xferCmd:		JUMP	doneCmd
+doneCmd:		LOAD	sF, 00
+			STAR	s1, sF
+			CALL	UART_wait
+			JUMP	start
+sleep:			LOAD	s1, FF
+sleep_jp1:		SUB	s0, 01
+			SUBCY	s1, 00
+			JUMP	NZ, sleep_jp1
+			RETURN	
+skipWhitespace:		COMPARE	sF, 00
+			RETURN	Z
+			FETCH	s0, (s2)
+			COMPARE	s0, 20
+			RETURN	NZ
+			SUB	sF, 01
+			ADD	s2, 01
+			JUMP	skipWhitespace
+; ZMODEM transfers:
+; ZRQINIT:
+; ZPAD ZPAD ZDLE ZHEX 0x30 (x16) (end)
+sendZRQINIT: call	UART_wait
+	     OUTPUTK    ZPAD,   UART_Tx_port
+	     OUTPUTK	ZPAD,	UART_Tx_port
+	     OUTPUTK	ZDLE, 	UART_Tx_port
+	     OUTPUTK	ZHEX,	UART_Tx_port
+	     load	s1, 	30
+	     load	s0,	0B
+	     call	outloop
+	     call	UART_wait
+	     load	s0,	04
+	     call	outloop
+	     OUTPUTK	CR_char, UART_Tx_port
+	     OUTPUTK	LF_char, UART_Tx_port
+             OUTPUTK	XON, 	UART_Tx_port
+	     RETURN
+outloop: OUTPUT s1, UART_Tx_port
+	 SUB s0, 01
+	 RETURN Z
+	 JUMP outloop
+; Encodes a value in (s0) in
+; hex into (s1, s0). Do this by
+; copying, swapping the nybbles,
+; comparing to 0A. Add 0x27 if it's
+; above 0A. Then add 0x30 regardless.
+; Done.
+hexenc:	 	LOAD s1, s0
+	 	call nybbleSwap
+	 	AND  s0, 0F
+	 	AND  s1, 0F
+	 	COMPARE s0, 0A
+	 	JUMP C,  hexenc_jp1
+	 	ADD  s0, 07
+hexenc_jp1:  	ADD  s0, 30
+		COMPARE s1, 0A
+		JUMP C, hexenc_jp2
+		ADD  s1, 07
+hexenc_jp2:	ADD  s1, 30
+		RETURN		
+; Decodes a 2-byte hex encoded value in (s1, s0)
+; and returns value in s0.
+;
+; Steps: 0-9 are encoded 0x30-0x39, 10-15 are encoded
+;        0x61-0x66. Test bit 0x40. If it's set, add 9.
+;        Then clear the high nybble. Note that this
+;        happily works for both capital hex (0x41-0x46)
+;        and lowercase hex (0x61-0x66).
+;        Hex decoding is *awesome*.
+hexdec:		TEST	s0, 40
+		JUMP	Z, hexdec_jp1
+		ADD	s0, 09
+hexdec_jp1:	AND	s0, 0F
+		TEST	s1, 40
+		JUMP	Z, hexdec_jp2
+		ADD	s1, 09
+hexdec_jp2:	AND	s1, 0F
+		CALL	nybbleSwap
+		OR	s0, s1
+		RETURN
+; Nybble swap.
+nybbleSwap:	RL	s1
+		RL	s1
+		RL	s1
+		RL	s1
+		RETURN
+ISR_ZMODEM:	RETURNI ENABLE
+ISR:		REGBANK	B
+		INPUT	s0, UART_Rx_port
+		TEST	Sermode, Sermode_Zmodem
+		JUMP	NZ, ISR_ZMODEM
+; Accept either CR or LF as line ending (not both)
+		COMPARE	s0, CR_char
+		JUMP	Z, ISR_complete
+		COMPARE	s0, LF_char
+		JUMP	Z, ISR_complete
+; Local echo, if enabled.
+		TEST	Sermode, Sermode_Lecho
+		JUMP	Z, ISR_process
+		OUTPUT	s0, UART_Tx_port
+; check if it's a backspace
+ISR_process:    COMPARE s0, 08
+; if it is, handle it special
+		JUMP	Z, ISR_backspace
+		LOAD	s2, recvBuffer			; load the recvBuffer pointer
+		ADD	s2, s1				; increment it by our current count
+		STORE	s0, (s2)			; and store the received data
+		ADD	s1, 01				; s1 is the number of bytes in buffer. Increment it.
+exit_ISR:	REGBANK	A
+		RETURNI	ENABLE
+ISR_complete:	OR	s1, 80				; bit 7 is the flag that the message is complete. Set it.
+		STAR	sF, s1				; and inform userspace
+		TEST	Sermode, Sermode_Lecho
+		JUMP	Z, exit_ISR
+		CALL	line_ending
+		JUMP	exit_ISR
+ISR_backspace:	OUTPUTK	20, UART_Tx_port		; Output a space to clear the original character
+		COMPARE	s1, 00
+		JUMP	Z, exit_ISR			; did we go too far? If so, skip the subtract and backspace.
+		OUTPUTK	08, UART_Tx_port		; Backspace (i.e. we did backspace, output a space, backspace: erase char)
+		SUB	s1, 01				; Reduce buffer count by 1.
+		JUMP	exit_ISR			; and exit the ISR
+ADDRESS		3FF
+ISRJMP:		JUMP	ISR
