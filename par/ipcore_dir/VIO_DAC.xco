@@ -1,7 +1,7 @@
 ##############################################################
 #
-# Xilinx Core Generator version 14.4
-# Date: Mon Oct 07 18:33:37 2013
+# Xilinx Core Generator version 14.7
+# Date: Thu Jun 25 17:56:09 2015
 #
 ##############################################################
 #
@@ -52,7 +52,7 @@ CSET synchronous_input_port_width=8
 CSET synchronous_output_port_width=8
 # END Parameters
 # BEGIN Extra information
-MISC pkg_timestamp=2012-12-18T02:47:56Z
+MISC pkg_timestamp=2013-10-13T14:14:09Z
 # END Extra information
 GENERATE
-# CRC: 8f083d04
+# CRC: c326a86d
